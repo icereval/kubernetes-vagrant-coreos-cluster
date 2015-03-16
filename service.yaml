@@ -1,0 +1,66 @@
+#cloud-config
+
+coreos:
+  fleet:
+    public-ip: $public_ipv4
+    metadata: role=service
+  flannel:
+    interface: ens34 # eth1
+    ip_masq: yes
+  units:
+    - name: etcd.service
+      command: start
+      content: |
+        [Unit]
+        Description=etcd 2.0
+        Requires=early-docker.service
+        After=early-docker.service
+        Before=early-docker.target
+
+        [Service]
+        Restart=always
+        RestartSec=5
+        Environment="TMPDIR=/var/tmp/"
+        Environment="DOCKER_HOST=unix:///var/run/early-docker.sock"
+        EnvironmentFile=/etc/environment
+        TimeoutStartSec=0
+        SyslogIdentifier=writer_process
+        LimitNOFILE=40000
+        ExecStartPre=-/usr/bin/docker kill etcd
+        ExecStartPre=-/usr/bin/docker rm etcd
+        ExecStartPre=/usr/bin/docker pull quay.io/coreos/etcd:v2.0.5
+        ExecStart=/bin/bash -c "/usr/bin/docker run \
+          --net=host \
+          -p 2379:2379 \
+          -p 2380:2380 \
+          -p 4001:4001 \
+          -p 7001:7001 \
+          --name etcd \
+          -v /opt/etcd:/opt/etcd \
+          -v /usr/share/ca-certificates/:/etc/ssl/certs \
+          quay.io/coreos/etcd:v2.0.5 \
+          -data-dir /opt/etcd \
+          -name __NAME__ \
+          -listen-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001 \
+          -advertise-client-urls http://$COREOS_PRIVATE_IPV4:2379,http://$COREOS_PRIVATE_IPV4:4001 \
+          -initial-cluster-token k8s_etcd \
+          -listen-peer-urls http://0.0.0.0:2380 \
+          -initial-advertise-peer-urls http://$COREOS_PRIVATE_IPV4:2380 \
+          -initial-cluster __ETCD_SEED_CLUSTER__ \
+          -initial-cluster-state new"
+        ExecStop=/usr/bin/docker kill etcd
+
+        [X-Fleet]
+        Conflicts=etcd*
+    - name: flanneld.service
+      command: start
+      drop-ins:
+        - name: 50-network-config.conf
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{"Network":"10.244.0.0/16", "Backend": {"Type": "vxlan"}}'
+    - name: fleet.service
+      command: start
+  update:
+    group: __CHANNEL__
+    reboot-strategy: off

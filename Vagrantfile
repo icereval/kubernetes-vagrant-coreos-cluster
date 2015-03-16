@@ -26,12 +26,13 @@ end
 VAGRANTFILE_API_VERSION = "2"
 Vagrant.require_version ">= 1.6.0"
 
+SERVICE_YAML = File.join(File.dirname(__FILE__), "service.yaml")
 MASTER_YAML = File.join(File.dirname(__FILE__), "master.yaml")
 NODE_YAML = File.join(File.dirname(__FILE__), "node.yaml")
 
 DOCKERCFG = File.expand_path(ENV['DOCKERCFG'] || "~/.dockercfg")
 
-KUBERNETES_VERSION = ENV['KUBERNETES_VERSION'] || '0.11.0'
+KUBERNETES_VERSION = ENV['KUBERNETES_VERSION'] || "0.12.1"
 if KUBERNETES_VERSION == "latest"
   url = "https://get.k8s.io"
   Object.redefine_const(:KUBERNETES_VERSION,
@@ -57,30 +58,34 @@ if COREOS_VERSION == "latest"
     open(url).read().scan(/COREOS_VERSION=.*/)[0].gsub('COREOS_VERSION=', ''))
 end
 
-NUM_INSTANCES = ENV['NUM_INSTANCES'] || 2
+SERVICE_INSTANCES = (ENV['SERVICE_INSTANCES'] || 3).to_i
+SERVICE_MEM = (ENV['MASTER_MEM'] || 512).to_i
+SERVICE_CPUS = (ENV['MASTER_CPUS'] || 1).to_i
 
-MASTER_MEM = ENV['MASTER_MEM'] || 512
-MASTER_CPUS = ENV['MASTER_CPUS'] || 1
+MASTER_INSTANCES = 1
+MASTER_MEM = (ENV['MASTER_MEM'] || 512).to_i
+MASTER_CPUS = (ENV['MASTER_CPUS'] || 1).to_i
 
-NODE_MEM= ENV['NODE_MEM'] || 1024
-NODE_CPUS = ENV['NODE_CPUS'] || 1
-
-ETCD_CLUSTER_SIZE = ENV['ETCD_CLUSTER_SIZE'] || 3
+NODE_INSTANCES = (ENV['NODE_INSTANCES'] || 2).to_i
+NODE_MEM = (ENV['NODE_MEM'] || 1024).to_i
+NODE_CPUS = (ENV['NODE_CPUS'] || 1).to_i
 
 SERIAL_LOGGING = (ENV['SERIAL_LOGGING'].to_s.downcase == 'true')
 GUI = (ENV['GUI'].to_s.downcase == 'true')
 
-(1..(NUM_INSTANCES.to_i + 1)).each do |i|
+(1..(SERVICE_INSTANCES)).each do |i|
   case i
   when 1
     ETCD_SEED_CLUSTER = ""
-    hostname = "master"
+    ETCD_SERVERS = ""
+    hostname = "core-service-%02d" % i
+    separator = ""
   else
-    hostname = ",node-%02d" % (i - 1)
+    hostname = ",core-service-%02d" % i
+    separator = ","
   end
-  if i <= ETCD_CLUSTER_SIZE
-    ETCD_SEED_CLUSTER.concat("#{hostname}=http://172.17.8.#{i+100}:2380")
-  end
+  ETCD_SEED_CLUSTER.concat("#{hostname}=http://172.17.8.#{i+100}:2380")
+  ETCD_SERVERS.concat("#{separator}http://172.17.8.#{i+100}:4001")
 end
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
@@ -124,14 +129,32 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.vbguest.auto_update = false
   end
 
-  (1..(NUM_INSTANCES.to_i + 1)).each do |i|
-    if i == 1
-      hostname = "master"
+  cur_i = 0
+
+  (1..(SERVICE_INSTANCES + MASTER_INSTANCES + NODE_INSTANCES)).each do |i|
+    if i == SERVICE_INSTANCES + MASTER_INSTANCES
+      # master
+      cur_i = 1
+    elsif i == SERVICE_INSTANCES + MASTER_INSTANCES + 1
+      # node
+      cur_i = 1
+    else
+      cur_i = cur_i + 1
+    end
+
+    if i <= SERVICE_INSTANCES
+      hostname = "core-service-%02d" % cur_i
+      cfg = SERVICE_YAML
+      memory = SERVICE_MEM
+      cpus = SERVICE_CPUS
+    elsif i == SERVICE_INSTANCES + MASTER_INSTANCES
+      cur_i = 1
+      hostname = "core-master-%02d" % cur_i
       cfg = MASTER_YAML
       memory = MASTER_MEM
       cpus = MASTER_CPUS
     else
-      hostname = "node-%02d" % (i - 1)
+      hostname = "core-node-%02d" % cur_i
       cfg = NODE_YAML
       memory = NODE_MEM
       cpus = NODE_CPUS
@@ -206,6 +229,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
           sed -i "s,__CHANNEL__,v#{CHANNEL},g" /tmp/vagrantfile-user-data
           sed -i "s,__NAME__,#{hostname},g" /tmp/vagrantfile-user-data
           sed -i "s|__ETCD_SEED_CLUSTER__|#{ETCD_SEED_CLUSTER}|g" /tmp/vagrantfile-user-data
+          sed -i "s|__ETCD_SERVERS__|#{ETCD_SERVERS}|g" /tmp/vagrantfile-user-data
           mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/
         EOF
       end
